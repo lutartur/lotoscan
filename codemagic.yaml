@@ -1,47 +1,11 @@
 workflows:
   android-release:
-    name: Android Release Build
-    max_build_duration: 60
-    environment:
-      android_sdk: 33
-      java: 11
-    triggering:
-      events:
-        - push
-        - pull_request
-      branch:
-        patterns:
-          - pattern: main
-            include: true
+    name: Build Android App
+    instance_type: linux
+
     scripts:
-      - name: Set up local.properties
-        script: |
-          echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
-
       - name: Build APK
-        script: |
-          ./gradlew assembleRelease
-
-      - name: Build APK Debug
-        script: |
-          ./gradlew assembleDebug
+        script: ./gradlew assembleRelease
 
     artifacts:
       - app/build/outputs/apk/release/**/*.apk
-      - app/build/outputs/apk/debug/**/*.apk
-      - app/build/outputs/bundle/release/**/*.aab
-
-    publishing:
-      slack:
-        channel: '#builds'
-        notify_on_build_start: true
-        notify:
-          success: true
-          failure: true
-
-      email:
-        recipients:
-          - your_email@example.com
-        notify:
-          success: true
-          failure: true
