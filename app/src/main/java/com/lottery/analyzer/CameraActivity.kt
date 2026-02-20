@@ -74,7 +74,7 @@ class CameraActivity : AppCompatActivity(), SurfaceHolder.Callback, Camera.Previ
                 val params = camera.parameters
                 val width = params.previewSize.width
                 val height = params.previewSize.height
-                val image = InputImage.fromByteArray(data, width, height, InputImage.IMAGE_FORMAT_NV21)
+                val image = InputImage.fromByteArray(data, width, height, 0, InputImage.IMAGE_FORMAT_NV21)
                 textRecognizer.process(image).addOnSuccessListener { visionText ->
                     val blockResults = detectAndAnalyzeBlocks(visionText, width, height)
                     mainHandler.post {
