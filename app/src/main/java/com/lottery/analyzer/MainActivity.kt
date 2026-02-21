@@ -1,6 +1,7 @@
 package com.lottery.analyzer
 
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.text.Editable
@@ -12,7 +13,7 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import android.Manifest
+import com.lottery.analyzer.util.AppLogger
 
 class MainActivity : AppCompatActivity() {
 
@@ -26,11 +27,13 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
+        AppLogger.i("MainActivity created")
+        
         inputNumbers = findViewById(R.id.inputNumbers)
         statusText = findViewById(R.id.statusText)
         scanButton = findViewById(R.id.scanButton)
         infoText = findViewById(R.id.infoText)
-
+        
         setupUI()
         checkPermissions()
     }
@@ -45,12 +48,31 @@ class MainActivity : AppCompatActivity() {
         })
 
         scanButton.setOnClickListener { validateAndScan() }
-        updateInfoText()
+        infoText.text = buildInfoText()
+    }
+
+    private fun buildInfoText(): String {
+        return """
+            📋 СТРУКТУРА БИЛЕТА "РУССКОЕ ЛОТО":
+
+            🔹 БЛОК 1 (ВЕРХНИЙ): 15 чисел
+               • 3 строки × 9 ячеек
+               • В каждой строке 5 заполненных чисел
+
+            🔹 БЛОК 2 (НИЖНИЙ): 15 чисел
+               • 3 строки × 9 ячеек
+               • В каждой строке 5 заполненных чисел
+
+            📱 РЕЗУЛЬТАТЫ:
+            🟢 Зелёная = 15 совпадений (выигрыш!)
+            🟡 Жёлтая = 13-14 совпадений
+            🔴 Красная = менее 13 совпадений
+        """.trimIndent()
     }
 
     private fun updateStatus() {
         val input = inputNumbers.text.toString().trim()
-        
+
         if (input.isEmpty()) {
             statusText.text = "Введите 15 чисел через запятую или пробел"
             statusText.setTextColor(ContextCompat.getColor(this, R.color.text_gray))
@@ -82,28 +104,13 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun updateInfoText() {
-        infoText.text = """
-            📋 СТРУКТУРА БИЛЕТА "РУССКОЕ ЛОТО":
-            
-            🔹 БЛОК 1 (ВЕРХНИЙ): 15 чисел
-               • 3 строки × 9 ячеек
-               • В каждой строке 5 заполненных чисел
-            
-            🔹 БЛОК 2 (НИЖНИЙ): 15 чисел
-               • 3 строки × 9 ячеек
-               • В каждой строке 5 заполненных чисел
-            
-            📱 РЕЗУЛЬТАТЫ:
-            🟢 Зелёная = 15 совпадений (выигрыш!)
-            🟡 Жёлтая = 13-14 совпадений
-            🔴 Красная = менее 13 совпадений
-        """.trimIndent()
-    }
-
     private fun parseNumbers(input: String): List<Int> {
-        return input.split("[,\\s]+".toRegex()).filter { it.isNotEmpty() }
-            .mapNotNull { it.toIntOrNull() }.filter { it in 1..90 }.distinct().sorted()
+        return input.split("[,\\s]+".toRegex())
+            .filter { it.isNotEmpty() }
+            .mapNotNull { it.toIntOrNull() }
+            .filter { it in 1..90 }
+            .distinct()
+            .sorted()
     }
 
     private fun validateAndScan() {
@@ -112,41 +119,96 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
-            == android.content.pm.PackageManager.PERMISSION_GRANTED) {
-            startCameraActivity()
+        if (!hasCameraPermission()) {
+            ActivityCompat.requestPermissions(
+                this, 
+                arrayOf(android.Manifest.permission.CAMERA), 
+                CAMERA_PERMISSION_REQUEST
+            )
         } else {
-            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.CAMERA), CAMERA_PERMISSION_REQUEST)
+            startCameraActivity()
         }
     }
 
     private fun startCameraActivity() {
+        AppLogger.i("Starting CameraActivity with ${selectedNumbers.size} numbers")
         val intent = Intent(this, CameraActivity::class.java)
         intent.putIntegerArrayListExtra("selectedNumbers", ArrayList(selectedNumbers))
         startActivity(intent)
     }
 
+    private fun hasCameraPermission(): Boolean {
+        return ContextCompat.checkSelfPermission(
+            this, 
+            android.Manifest.permission.CAMERA
+        ) == PackageManager.PERMISSION_GRANTED
+    }
+
     private fun checkPermissions() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            val permissions = arrayOf(Manifest.permission.CAMERA, Manifest.permission.READ_EXTERNAL_STORAGE)
-            val permissionsToRequest = permissions.filter { ContextCompat.checkSelfPermission(this, it) != android.content.pm.PackageManager.PERMISSION_GRANTED }.toTypedArray()
-            if (permissionsToRequest.isNotEmpty()) {
-                ActivityCompat.requestPermissions(this, permissionsToRequest, PERMISSIONS_REQUEST_CODE)
+        val permissions = mutableListOf<String>()
+        
+        if (!hasCameraPermission()) {
+            permissions.add(android.Manifest.permission.CAMERA)
+        }
+        
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(
+                    this,
+                    android.Manifest.permission.READ_MEDIA_IMAGES
+                ) != PackageManager.PERMISSION_GRANTED
+            ) {
+                permissions.add(android.Manifest.permission.READ_MEDIA_IMAGES)
             }
+        } else {
+            if (ContextCompat.checkSelfPermission(
+                    this,
+                    android.Manifest.permission.READ_EXTERNAL_STORAGE
+                ) != PackageManager.PERMISSION_GRANTED
+            ) {
+                permissions.add(android.Manifest.permission.READ_EXTERNAL_STORAGE)
+            }
+        }
+
+        if (permissions.isNotEmpty()) {
+            ActivityCompat.requestPermissions(
+                this,
+                permissions.toTypedArray(),
+                PERMISSIONS_REQUEST_CODE
+            )
         }
     }
 
-    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<String>, grantResults: IntArray) {
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<String>,
+        grantResults: IntArray
+    ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         when (requestCode) {
             PERMISSIONS_REQUEST_CODE -> {
-                if (grantResults.isNotEmpty() && grantResults[0] == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                val allGranted = grantResults.all { it == PackageManager.PERMISSION_GRANTED }
+                if (allGranted) {
                     Toast.makeText(this, "Разрешения предоставлены", Toast.LENGTH_SHORT).show()
+                    AppLogger.i("Permissions granted")
+                } else {
+                    Toast.makeText(
+                        this, 
+                        "Требуется доступ к камере для сканирования", 
+                        Toast.LENGTH_LONG
+                    ).show()
+                    AppLogger.w("Permissions denied")
                 }
             }
             CAMERA_PERMISSION_REQUEST -> {
-                if (grantResults.isNotEmpty() && grantResults[0] == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                if (grantResults.isNotEmpty() && 
+                    grantResults[0] == PackageManager.PERMISSION_GRANTED) {
                     startCameraActivity()
+                } else {
+                    Toast.makeText(
+                        this, 
+                        "Без доступа к камере сканирование невозможно", 
+                        Toast.LENGTH_LONG
+                    ).show()
                 }
             }
         }

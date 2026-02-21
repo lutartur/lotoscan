@@ -21,27 +21,29 @@ Lottery Analyzer использует камеру устройства для �
 
 | Компонент | Версия |
 |-----------|--------|
-| Android Gradle Plugin | 7.4.0 |
-| Kotlin | 1.8.0 |
-| Gradle | 8.5 |
-| Android SDK | 33 (target), 29 (min) |
-| Java | 11+ (требуется для сборки) |
+| Android Gradle Plugin | 8.2.2 |
+| Kotlin | 1.9.22 |
+| Gradle | 8.6 |
+| Android SDK | 34 (target), 29 (min) |
+| Java | 17 (JDK от Android Studio) |
 
 ## Зависимости
 
 ### AndroidX
-- `androidx.core:core-ktx:1.9.0`
-- `androidx.appcompat:appcompat:1.5.1`
+- `androidx.core:core-ktx:1.12.0`
+- `androidx.appcompat:appcompat:1.6.1`
 - `androidx.constraintlayout:constraintlayout:2.1.4`
-- `androidx.lifecycle:lifecycle-runtime-ktx:2.5.1`
+- `androidx.activity:activity-ktx:1.8.2`
+- `androidx.lifecycle:lifecycle-runtime-ktx:2.7.0`
+- `androidx.lifecycle:lifecycle-viewmodel-ktx:2.7.0`
 
 ### ML Kit
 - `com.google.mlkit:text-recognition:16.0.0`
 
 ### Тестирование
 - `junit:junit:4.13.2`
-- `androidx.test.ext:junit:1.1.4`
-- `androidx.test.espresso:espresso-core:3.5.0`
+- `androidx.test.ext:junit:1.1.5`
+- `androidx.test.espresso:espresso-core:3.5.1`
 
 ## Переменные окружения
 
