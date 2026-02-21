@@ -1,7 +1,7 @@
 package com.lottery.analyzer
 
-import android.content.Context
-import android.graphics.*
+import android.graphics.Color
+import android.graphics.Rect
 import android.hardware.Camera
 import android.os.Bundle
 import android.os.Handler
@@ -37,14 +37,6 @@ class CameraActivity : AppCompatActivity(), SurfaceHolder.Callback, Camera.Previ
     private val isProcessing = AtomicBoolean(false)
     private var lastProcessingTime = 0L
 
-    data class BlockResult(
-        val blockNumber: Int, 
-        val boundingRect: Rect, 
-        val extractedNumbers: List<Int>, 
-        val matchCount: Int, 
-        val borderColor: Int
-    )
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_camera)
@@ -56,10 +48,9 @@ class CameraActivity : AppCompatActivity(), SurfaceHolder.Callback, Camera.Previ
         cameraPreview = findViewById(R.id.cameraPreview)
         statusText = findViewById(R.id.statusText)
         backButton = findViewById(R.id.backButton)
-        overlay = DrawingOverlay(this)
+        overlay = findViewById(R.id.drawingOverlay)
         surfaceHolder = surfaceView.holder
         surfaceHolder.addCallback(this)
-        cameraPreview.addView(overlay)
         statusText.text = "Инициализация камеры..."
         
         backButton.setOnClickListener {
@@ -70,10 +61,10 @@ class CameraActivity : AppCompatActivity(), SurfaceHolder.Callback, Camera.Previ
 
     override fun surfaceCreated(holder: SurfaceHolder) {
         try {
-            AppLogger.d("Surface created, opening camera...")
+            AppLogger.d("Surface created: ${holder.surfaceFrame.width()}x${holder.surfaceFrame.height()}")
             camera = Camera.open()
             val params = camera!!.parameters
-            
+
             // Выбираем оптимальный размер превью
             val previewSize = getOptimalPreviewSize(params.supportedPreviewSizes, surfaceView.width, surfaceView.height)
             if (previewSize != null) {
@@ -81,11 +72,18 @@ class CameraActivity : AppCompatActivity(), SurfaceHolder.Callback, Camera.Previ
                 camera!!.parameters = params
                 AppLogger.d("Preview size set to ${previewSize.width}x${previewSize.height}")
             }
-            
+
             // Устанавливаем ориентацию камеры для портретного режима (90 градусов)
             camera!!.setDisplayOrientation(90)
             camera!!.setPreviewDisplay(holder)
-            camera!!.setPreviewCallback(this)
+
+            // Устанавливаем callback buffer для предотвращения блокировки превью
+            if (previewSize != null) {
+                val bufferSize = previewSize.width * previewSize.height * 3 / 2
+                camera!!.addCallbackBuffer(ByteArray(bufferSize))
+                camera!!.setPreviewCallbackWithBuffer(this)
+            }
+
             camera!!.startPreview()
             isPreviewing.set(true)
             statusText.text = "Сканирование..."
@@ -102,18 +100,25 @@ class CameraActivity : AppCompatActivity(), SurfaceHolder.Callback, Camera.Previ
 
     private fun getOptimalPreviewSize(sizes: List<Camera.Size>, w: Int, h: Int): Camera.Size? {
         if (sizes.isEmpty()) return null
+        
         // Для портретной ориентации меняем ширину и высоту местами
-        val targetHeight = w
-        val targetWidth = h
+        // Камера установлена горизонтально, но мы держим телефон вертикально
+        val targetWidth = h  // Высота view становится шириной после поворота на 90°
+        val targetHeight = w  // Ширина view становится высотой после поворота
+        
         var bestSize: Camera.Size? = null
         var minDiff = Double.MAX_VALUE
+        
         for (size in sizes) {
-            val diff = Math.abs(size.height - targetHeight) + Math.abs(size.width - targetWidth)
+            // Ищем размер с минимальной разницей
+            val diff = Math.abs(size.width - targetWidth) + Math.abs(size.height - targetHeight)
             if (diff < minDiff) {
                 minDiff = diff.toDouble()
                 bestSize = size
             }
         }
+        
+        AppLogger.d("Optimal preview: ${bestSize?.width}x${bestSize?.height} for target ${targetWidth}x${targetHeight}")
         return bestSize
     }
 
@@ -145,6 +150,7 @@ class CameraActivity : AppCompatActivity(), SurfaceHolder.Callback, Camera.Previ
                 isPreviewing.set(false)
             }
             camera?.setPreviewCallback(null)
+            camera?.setPreviewCallbackWithBuffer(null)
             camera?.release()
             camera = null
             AppLogger.i("Camera released")
@@ -195,34 +201,49 @@ class CameraActivity : AppCompatActivity(), SurfaceHolder.Callback, Camera.Previ
         }
     }
 
+    private var processing = AtomicBoolean(false)
+    private var lastFrameTime = 0L
+
     override fun onPreviewFrame(data: ByteArray, camera: Camera) {
-        // Защита от повторной обработки
-        if (!isPreviewing.get() || !isProcessing.compareAndSet(false, true)) {
+        // Освобождаем кадр сразу для предотвращения блокировки превью
+        camera.addCallbackBuffer(data)
+        
+        // Пропускаем кадры если предыдущий еще обрабатывается или прошло мало времени
+        val currentTime = System.currentTimeMillis()
+        if (processing.get() || (currentTime - lastFrameTime) < 500) {
             return
         }
+        
+        processing.set(true)
+        lastFrameTime = currentTime
+        
+        // Копируем данные для асинхронной обработки
+        val frameData = data.copyOf()
+        val params = camera.parameters
+        val previewWidth = params.previewSize.width
+        val previewHeight = params.previewSize.height
         
         executor.execute {
             try {
                 val startTime = System.currentTimeMillis()
-                val params = camera.parameters
-                val width = params.previewSize.width
-                val height = params.previewSize.height
                 
-                // Используем изображение как есть, ML Kit сам обработает ориентацию
-                val image = InputImage.fromByteArray(data, width, height, 0, InputImage.IMAGE_FORMAT_NV21)
+                // ML Kit получает изображение в ландшафтной ориентации
+                // rotation = 90 означает поворот по часовой стрелке на 90 градусов
+                val image = InputImage.fromByteArray(frameData, previewWidth, previewHeight, 90, InputImage.IMAGE_FORMAT_NV21)
                 
                 textRecognizer.process(image)
                     .addOnSuccessListener { visionText ->
-                        val blockResults = detectAndAnalyzeBlocks(visionText, width, height)
+                        // ML Kit с rotation=90 возвращает координаты для повернутого изображения
+                        // Размеры: previewHeight становится шириной, previewWidth становится высотой
+                        val blockResults = detectAndAnalyzeBlocks(visionText, previewHeight, previewWidth)
                         mainHandler.post {
-                            overlay.setBlockResults(blockResults, width, height)
+                            // Передаем размеры повернутого изображения для масштабирования
+                            overlay.setBlockResults(blockResults, previewHeight, previewWidth)
                             overlay.invalidate()
                             updateStatus(blockResults)
                         }
                         
-                        // Логирование производительности
                         val duration = System.currentTimeMillis() - startTime
-                        lastProcessingTime = duration
                         if (duration > 500) {
                             AppLogger.w("Processing took ${duration}ms")
                         }
@@ -231,109 +252,133 @@ class CameraActivity : AppCompatActivity(), SurfaceHolder.Callback, Camera.Previ
                         AppLogger.e("Text recognition failed", e)
                     }
                     .addOnCompleteListener {
-                        isProcessing.set(false)
+                        processing.set(false)
                     }
             } catch (e: Exception) {
                 AppLogger.e("Preview frame processing error", e)
-                isProcessing.set(false)
+                processing.set(false)
             }
         }
     }
 
-    private fun detectAndAnalyzeBlocks(visionText: com.google.mlkit.vision.text.Text, width: Int, height: Int): List<BlockResult> {
-        val results = mutableListOf<BlockResult>()
-        val allElements = mutableListOf<TextElement>()
-
+    private fun detectAndAnalyzeBlocks(visionText: com.google.mlkit.vision.text.Text, width: Int, height: Int): List<DrawingOverlay.BlockResult> {
+        val results = mutableListOf<DrawingOverlay.BlockResult>()
+        
+        // Сначала собираем все числа
+        val allNumbers = mutableListOf<TextElement>()
+        
         for (block in visionText.textBlocks) {
             for (line in block.lines) {
                 for (element in line.elements) {
                     val rect = element.boundingBox
+                    val rawText = element.text
+
                     if (rect != null) {
-                        allElements.add(TextElement(element.text, rect))
+                        val centerY = rect.centerY()
+                        
+                        // Фильтруем слишком широкие элементы
+                        val elementWidth = rect.right - rect.left
+                        val elementHeight = rect.bottom - rect.top
+                        if (elementWidth > 200 || elementHeight > 100) {
+                            continue
+                        }
+                        // Фильтруем элементы, которые не являются числами
+                        if (rawText == null || rawText.length < 1 || rawText.length > 3) {
+                            continue
+                        }
+
+                        // Проверяем, является ли текст числом от 1 до 90
+                        val num = rawText.toIntOrNull()
+                        if (num == null || num !in 1..90) {
+                            continue
+                        }
+
+                        allNumbers.add(TextElement(rawText, rect, 0))
                     }
                 }
             }
         }
-
-        if (allElements.isEmpty()) {
-            AppLogger.d("No text elements detected")
+        
+        if (allNumbers.isEmpty()) {
+            AppLogger.d("No numbers detected")
             return results
         }
-
-        AppLogger.d("Detected ${allElements.size} elements in ${width}x${height} image")
-
-        // Разделяем на верхний и нижний блоки по горизонтали (Y координате)
-        // Сортируем элементы по Y координате
-        val sortedByY = allElements.sortedBy { it.rect.top }
         
-        // Находим середину по Y
-        val midY = height / 2
+        // Сортируем числа по Y-координате
+        val sortedByY = allNumbers.sortedBy { it.rect.centerY() }
         
-        // Разделяем на два блока
-        val upperElements = sortedByY.filter { it.rect.centerY() < midY }
-        val lowerElements = sortedByY.filter { it.rect.centerY() >= midY }
-
-        AppLogger.d("Upper block: ${upperElements.size} elements, Lower block: ${lowerElements.size} elements")
-
-        if (upperElements.isNotEmpty()) {
-            results.add(processBlock(1, upperElements, width, height))
+        // Ищем самый большой разрыв по Y между соседними числами
+        var maxGap = 0
+        var gapIndex = -1
+        for (i in 1 until sortedByY.size) {
+            val gap = sortedByY[i].rect.centerY() - sortedByY[i - 1].rect.centerY()
+            if (gap > maxGap) {
+                maxGap = gap
+                gapIndex = i
+            }
         }
-        if (lowerElements.isNotEmpty()) {
-            results.add(processBlock(2, lowerElements, width, height))
+        
+        val boundaryY = if (gapIndex > 0) {
+            (sortedByY[gapIndex - 1].rect.centerY() + sortedByY[gapIndex].rect.centerY()) / 2
+        } else {
+            sortedByY[sortedByY.size / 2].rect.centerY()
+        }
+        
+        // Разделяем числа на верхние и нижние относительно найденного разрыва
+        val upperNumberElements = sortedByY.filter { it.rect.centerY() < boundaryY }
+        val lowerNumberElements = sortedByY.filter { it.rect.centerY() >= boundaryY }
+        
+        AppLogger.d("=== Detection with gap-based Y-split ===")
+        AppLogger.d("Total numbers: ${allNumbers.size}, Max gap: $maxGap at index $gapIndex, Boundary Y: $boundaryY")
+        AppLogger.d("Upper block: ${upperNumberElements.size} numbers")
+        AppLogger.d("Lower block: ${lowerNumberElements.size} numbers")
+        
+        // Создаём рамки для блоков на основе распознанных чисел
+        if (upperNumberElements.isNotEmpty()) {
+            results.add(createBlockResultFromElements(1, upperNumberElements, width, height))
+        }
+        if (lowerNumberElements.isNotEmpty()) {
+            results.add(createBlockResultFromElements(2, lowerNumberElements, width, height))
         }
 
         return results
     }
-
-    private fun processBlock(blockNumber: Int, elements: List<TextElement>, screenWidth: Int, screenHeight: Int): BlockResult {
-        // Сортируем элементы по строкам (группируем по Y координате)
-        val sortedByLines = elements.groupBy { (it.rect.top / 20).toInt() }.toSortedMap()
-        val extractedNumbers = mutableListOf<Int>()
-
-        for (line in sortedByLines.values) {
-            // Сортируем по X координате внутри строки
-            val sortedByX = line.sortedBy { it.rect.left }
-            for (element in sortedByX) {
-                val num = element.text.toIntOrNull()
-                if (num != null && num in 1..90 && !extractedNumbers.contains(num)) {
-                    extractedNumbers.add(num)
-                }
-            }
-            if (extractedNumbers.size >= 15) break
-        }
-
-        val numbersInBlock = extractedNumbers.take(15)
-        val matchCount = numbersInBlock.intersect(selectedNumbers.toSet()).size
+    
+    /**
+     * Создаёт рамку блока на основе распознанных элементов
+     */
+    private fun createBlockResultFromElements(
+        blockNumber: Int,
+        elements: List<TextElement>,
+        previewWidth: Int,
+        previewHeight: Int
+    ): DrawingOverlay.BlockResult {
+        val extractedNumbers = elements.mapNotNull { it.text.toIntOrNull() }.distinct().take(15)
+        val matchCount = extractedNumbers.intersect(selectedNumbers.toSet()).size
         val borderColor = when {
             matchCount == 15 -> Color.GREEN
             matchCount >= 13 -> Color.YELLOW
             else -> Color.RED
         }
 
-        // Вычисляем общий boundingRect для всех элементов блока
+        // Находим границы по всем элементам
         if (elements.isEmpty()) {
-            return BlockResult(blockNumber, Rect(0, 0, 100, 100), numbersInBlock, matchCount, borderColor)
+            return DrawingOverlay.BlockResult(blockNumber, Rect(0, 0, 100, 100), extractedNumbers, matchCount, borderColor)
         }
 
         val minX = elements.minOf { it.rect.left }
         val minY = elements.minOf { it.rect.top }
         val maxX = elements.maxOf { it.rect.right }
         val maxY = elements.maxOf { it.rect.bottom }
+
+        val boundingRect = Rect(minX, minY, maxX, maxY)
         
-        val padding = 20
-        val boundingRect = Rect(
-            maxOf(minX - padding, 0),
-            maxOf(minY - padding, 0),
-            minOf(maxX + padding, screenWidth),
-            minOf(maxY + padding, screenHeight)
-        )
+        AppLogger.d("Block $blockNumber: ${elements.size} elements, ${extractedNumbers.size} numbers, matches: $matchCount, rect=[$boundingRect]")
 
-        AppLogger.d("Block $blockNumber: ${elements.size} elements, rect: $boundingRect, numbers: ${numbersInBlock.size}, matches: $matchCount")
-
-        return BlockResult(blockNumber, boundingRect, numbersInBlock, matchCount, borderColor)
+        return DrawingOverlay.BlockResult(blockNumber, boundingRect, extractedNumbers, matchCount, borderColor)
     }
 
-    private fun updateStatus(results: List<BlockResult>) {
+    private fun updateStatus(results: List<DrawingOverlay.BlockResult>) {
         val status = StringBuilder()
         for (result in results) {
             val blockName = if (result.blockNumber == 1) "ВЕРХНИЙ" else "НИЖНИЙ"
@@ -347,60 +392,5 @@ class CameraActivity : AppCompatActivity(), SurfaceHolder.Callback, Camera.Previ
         statusText.text = status.toString()
     }
 
-    data class TextElement(val text: String, val rect: Rect)
-
-    inner class DrawingOverlay(context: Context) : android.view.View(context) {
-        private var scaledBlockResults: List<BlockResult> = emptyList()
-        private val borderPaint = Paint().apply { 
-            style = Paint.Style.STROKE
-            strokeWidth = 8f
-            strokeCap = Paint.Cap.ROUND
-        }
-        private val textPaint = Paint().apply { 
-            textSize = 50f
-            color = Color.WHITE
-            isFakeBoldText = true
-            setShadowLayer(4f, 2f, 2f, Color.BLACK)
-        }
-
-        fun setBlockResults(results: List<BlockResult>, imageWidth: Int, imageHeight: Int) { 
-            // Масштабируем прямоугольники под размер view
-            val viewWidth = width.toFloat()
-            val viewHeight = height.toFloat()
-            
-            scaledBlockResults = if (viewWidth > 0 && viewHeight > 0 && imageWidth > 0 && imageHeight > 0) {
-                // Коэффициенты масштабирования
-                val scaleX = viewWidth / imageWidth.toFloat()
-                val scaleY = viewHeight / imageHeight.toFloat()
-                
-                results.map { result ->
-                    val scaledRect = Rect(
-                        (result.boundingRect.left * scaleX).toInt(),
-                        (result.boundingRect.top * scaleY).toInt(),
-                        (result.boundingRect.right * scaleX).toInt(),
-                        (result.boundingRect.bottom * scaleY).toInt()
-                    )
-                    result.copy(boundingRect = scaledRect)
-                }
-            } else {
-                results
-            }
-            AppLogger.d("Overlay scaled: ${imageWidth}x${imageHeight} -> ${viewWidth.toInt()}x${viewHeight.toInt()}")
-        }
-
-        override fun onDraw(canvas: Canvas) {
-            super.onDraw(canvas)
-            for (result in scaledBlockResults) {
-                borderPaint.color = result.borderColor
-                borderPaint.alpha = 255
-                borderPaint.strokeWidth = 10f
-                canvas.drawRect(result.boundingRect, borderPaint)
-
-                val blockLabel = if (result.blockNumber == 1) "ВЕРХНИЙ" else "НИЖНИЙ"
-                val infoText = "${blockLabel}: ${result.matchCount}/15"
-                textPaint.color = result.borderColor
-                canvas.drawText(infoText, result.boundingRect.left.toFloat() + 20, result.boundingRect.top.toFloat() - 20, textPaint)
-            }
-        }
-    }
+    data class TextElement(val text: String, val rect: Rect, val blockNumber: Int = 0)
 }

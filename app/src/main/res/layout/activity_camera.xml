@@ -4,7 +4,7 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@color/black">
-    
+
     <FrameLayout
         android:id="@+id/cameraPreview"
         android:layout_width="0dp"
@@ -13,9 +13,14 @@
         app:layout_constraintBottom_toTopOf="@+id/controlPanel"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent">
-        
+
         <SurfaceView
             android:id="@+id/surfaceView"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent" />
+
+        <com.lottery.analyzer.DrawingOverlay
+            android:id="@+id/drawingOverlay"
             android:layout_width="match_parent"
             android:layout_height="match_parent" />
     </FrameLayout>
