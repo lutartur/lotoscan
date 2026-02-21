@@ -73,14 +73,16 @@ class CameraActivity : AppCompatActivity(), SurfaceHolder.Callback, Camera.Previ
             AppLogger.d("Surface created, opening camera...")
             camera = Camera.open()
             val params = camera!!.parameters
-            // Устанавливаем правильный размер превью для портретной ориентации
+            
+            // Выбираем оптимальный размер превью
             val previewSize = getOptimalPreviewSize(params.supportedPreviewSizes, surfaceView.width, surfaceView.height)
             if (previewSize != null) {
                 params.setPreviewSize(previewSize.width, previewSize.height)
                 camera!!.parameters = params
                 AppLogger.d("Preview size set to ${previewSize.width}x${previewSize.height}")
             }
-            // Устанавливаем ориентацию камеры для портретного режима
+            
+            // Устанавливаем ориентацию камеры для портретного режима (90 градусов)
             camera!!.setDisplayOrientation(90)
             camera!!.setPreviewDisplay(holder)
             camera!!.setPreviewCallback(this)
@@ -206,13 +208,14 @@ class CameraActivity : AppCompatActivity(), SurfaceHolder.Callback, Camera.Previ
                 val width = params.previewSize.width
                 val height = params.previewSize.height
                 
+                // Используем изображение как есть, ML Kit сам обработает ориентацию
                 val image = InputImage.fromByteArray(data, width, height, 0, InputImage.IMAGE_FORMAT_NV21)
                 
                 textRecognizer.process(image)
                     .addOnSuccessListener { visionText ->
                         val blockResults = detectAndAnalyzeBlocks(visionText, width, height)
                         mainHandler.post {
-                            overlay.setBlockResults(blockResults)
+                            overlay.setBlockResults(blockResults, width, height)
                             overlay.invalidate()
                             updateStatus(blockResults)
                         }
@@ -240,41 +243,65 @@ class CameraActivity : AppCompatActivity(), SurfaceHolder.Callback, Camera.Previ
     private fun detectAndAnalyzeBlocks(visionText: com.google.mlkit.vision.text.Text, width: Int, height: Int): List<BlockResult> {
         val results = mutableListOf<BlockResult>()
         val allElements = mutableListOf<TextElement>()
-        
+
         for (block in visionText.textBlocks) {
             for (line in block.lines) {
                 for (element in line.elements) {
                     val rect = element.boundingBox
-                    if (rect != null) allElements.add(TextElement(element.text, rect))
+                    if (rect != null) {
+                        allElements.add(TextElement(element.text, rect))
+                    }
                 }
             }
         }
+
+        if (allElements.isEmpty()) {
+            AppLogger.d("No text elements detected")
+            return results
+        }
+
+        AppLogger.d("Detected ${allElements.size} elements in ${width}x${height} image")
+
+        // Разделяем на верхний и нижний блоки по горизонтали (Y координате)
+        // Сортируем элементы по Y координате
+        val sortedByY = allElements.sortedBy { it.rect.top }
         
-        if (allElements.isEmpty()) return results
-        
+        // Находим середину по Y
         val midY = height / 2
-        val upperElements = allElements.filter { it.rect.centerY() < midY }
-        val lowerElements = allElements.filter { it.rect.centerY() >= midY }
         
-        if (upperElements.isNotEmpty()) results.add(processBlock(1, upperElements, width, height))
-        if (lowerElements.isNotEmpty()) results.add(processBlock(2, lowerElements, width, height))
-        
+        // Разделяем на два блока
+        val upperElements = sortedByY.filter { it.rect.centerY() < midY }
+        val lowerElements = sortedByY.filter { it.rect.centerY() >= midY }
+
+        AppLogger.d("Upper block: ${upperElements.size} elements, Lower block: ${lowerElements.size} elements")
+
+        if (upperElements.isNotEmpty()) {
+            results.add(processBlock(1, upperElements, width, height))
+        }
+        if (lowerElements.isNotEmpty()) {
+            results.add(processBlock(2, lowerElements, width, height))
+        }
+
         return results
     }
 
     private fun processBlock(blockNumber: Int, elements: List<TextElement>, screenWidth: Int, screenHeight: Int): BlockResult {
-        val sortedByLines = elements.groupBy { (it.rect.top / 30).toInt() }.toSortedMap()
+        // Сортируем элементы по строкам (группируем по Y координате)
+        val sortedByLines = elements.groupBy { (it.rect.top / 20).toInt() }.toSortedMap()
         val extractedNumbers = mutableListOf<Int>()
-        
+
         for (line in sortedByLines.values) {
+            // Сортируем по X координате внутри строки
             val sortedByX = line.sortedBy { it.rect.left }
             for (element in sortedByX) {
                 val num = element.text.toIntOrNull()
-                if (num != null && num in 1..90 && !extractedNumbers.contains(num)) extractedNumbers.add(num)
+                if (num != null && num in 1..90 && !extractedNumbers.contains(num)) {
+                    extractedNumbers.add(num)
+                }
             }
             if (extractedNumbers.size >= 15) break
         }
-        
+
         val numbersInBlock = extractedNumbers.take(15)
         val matchCount = numbersInBlock.intersect(selectedNumbers.toSet()).size
         val borderColor = when {
@@ -282,14 +309,27 @@ class CameraActivity : AppCompatActivity(), SurfaceHolder.Callback, Camera.Previ
             matchCount >= 13 -> Color.YELLOW
             else -> Color.RED
         }
-        
+
+        // Вычисляем общий boundingRect для всех элементов блока
+        if (elements.isEmpty()) {
+            return BlockResult(blockNumber, Rect(0, 0, 100, 100), numbersInBlock, matchCount, borderColor)
+        }
+
         val minX = elements.minOf { it.rect.left }
         val minY = elements.minOf { it.rect.top }
         val maxX = elements.maxOf { it.rect.right }
         val maxY = elements.maxOf { it.rect.bottom }
-        val padding = 10
-        val boundingRect = Rect(maxOf(minX - padding, 0), maxOf(minY - padding, 0), minOf(maxX + padding, screenWidth), minOf(maxY + padding, screenHeight))
         
+        val padding = 20
+        val boundingRect = Rect(
+            maxOf(minX - padding, 0),
+            maxOf(minY - padding, 0),
+            minOf(maxX + padding, screenWidth),
+            minOf(maxY + padding, screenHeight)
+        )
+
+        AppLogger.d("Block $blockNumber: ${elements.size} elements, rect: $boundingRect, numbers: ${numbersInBlock.size}, matches: $matchCount")
+
         return BlockResult(blockNumber, boundingRect, numbersInBlock, matchCount, borderColor)
     }
 
@@ -323,24 +363,29 @@ class CameraActivity : AppCompatActivity(), SurfaceHolder.Callback, Camera.Previ
             setShadowLayer(4f, 2f, 2f, Color.BLACK)
         }
 
-        fun setBlockResults(results: List<BlockResult>) { 
+        fun setBlockResults(results: List<BlockResult>, imageWidth: Int, imageHeight: Int) { 
             // Масштабируем прямоугольники под размер view
             val viewWidth = width.toFloat()
             val viewHeight = height.toFloat()
-            scaledBlockResults = if (viewWidth > 0 && viewHeight > 0) {
-                // Превью камеры повернуто на 90 градусов, нужно масштабировать
+            
+            scaledBlockResults = if (viewWidth > 0 && viewHeight > 0 && imageWidth > 0 && imageHeight > 0) {
+                // Коэффициенты масштабирования
+                val scaleX = viewWidth / imageWidth.toFloat()
+                val scaleY = viewHeight / imageHeight.toFloat()
+                
                 results.map { result ->
                     val scaledRect = Rect(
-                        (result.boundingRect.left * viewWidth / 720f).toInt(),
-                        (result.boundingRect.top * viewHeight / 1280f).toInt(),
-                        (result.boundingRect.right * viewWidth / 720f).toInt(),
-                        (result.boundingRect.bottom * viewHeight / 1280f).toInt()
+                        (result.boundingRect.left * scaleX).toInt(),
+                        (result.boundingRect.top * scaleY).toInt(),
+                        (result.boundingRect.right * scaleX).toInt(),
+                        (result.boundingRect.bottom * scaleY).toInt()
                     )
                     result.copy(boundingRect = scaledRect)
                 }
             } else {
                 results
             }
+            AppLogger.d("Overlay scaled: ${imageWidth}x${imageHeight} -> ${viewWidth.toInt()}x${viewHeight.toInt()}")
         }
 
         override fun onDraw(canvas: Canvas) {
